@@ -123,3 +123,7 @@ install.sh
   copying the new one (`rm` then `cp`). macOS caches the code signature per file.
 - **A mod misbehaves**: run `herdr-app check ~/.config/herdr-app/mods/<name>` and
   `herdr-app status` to see the error.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE). Parts derived from Herdr and serie are listed in [NOTICE](NOTICE).

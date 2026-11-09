@@ -1,3 +1,5 @@
+// Modified from Herdr's "spaces" mod (https://herdr.dev, Apache License 2.0).
+// Changes: renamed, plus this kit's additions (see NOTICE).
 // Workspace spaces: stable colored avatars, worktrees under their checkout,
 // grouped by machine when more than one is known. After a space's name, the repo
 // its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to

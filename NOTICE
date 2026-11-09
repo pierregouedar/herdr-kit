@@ -1,0 +1,15 @@
+herdr-kit
+Copyright 2026 Pierre Gouedar
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This kit includes work derived from the following projects:
+
+- Herdr Desktop (https://herdr.dev), Apache License 2.0.
+  herdr-app/mods/hk-pane and herdr-app/mods/hk-spaces are modified copies of Herdr's
+  "pane" and "spaces" mods. herdr-app/icons/omp.svg is derived from Herdr's Pi icon.
+  The changes are described at the top of each file.
+
+- serie (https://github.com/lusingander/serie), MIT License, Copyright (c) lusingander.
+  serie/mouse.patch is a patch against serie v0.10.1; install.sh downloads serie's source
+  and applies it. serie itself is not redistributed here.

@@ -1,3 +1,5 @@
+// Modified from Herdr's "pane" mod (https://herdr.dev, Apache License 2.0).
+// Changes: renamed, plus this kit's additions (see NOTICE).
 // A pane's header, for layouts that frame their panes:
 //   { "tab": "active", "pane": { "header": { "content": { "mod": "hk-pane" } } } }
 // Shows the program's icon (the app's program table), the agent's name or
