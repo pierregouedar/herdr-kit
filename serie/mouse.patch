@@ -1,0 +1,213 @@
+diff --git a/src/app.rs b/src/app.rs
+index 570c93a..e9ca00f 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -6,7 +6,7 @@ use std::{
+ use ratatui::{
+     backend::Backend,
+     crossterm::{
+-        event::{KeyCode, KeyEvent},
++        event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind},
+         SynchronizedUpdate,
+     },
+     layout::{Constraint, Layout, Rect},
+@@ -92,6 +92,7 @@ struct AppStatus {
+     numeric_prefix: String,
+     view_area: Rect,
+     pending_clear: PendingClear,
++    last_click: Option<(std::time::Instant, String)>,
+ }
+ 
+ #[derive(Debug)]
+@@ -244,6 +245,9 @@ impl App<'_> {
+                         }
+                     }
+                 }
++                AppEvent::Mouse(m) => {
++                    self.handle_mouse(m);
++                }
+                 AppEvent::Resize(w, h) => {
+                     let _ = (w, h);
+                 }
+@@ -375,6 +379,54 @@ impl App<'_> {
+         self.ctx.image_protocol.delete_images(&image_ids)
+     }
+ 
++    // Mouse: a click selects a commit and opens its detail, a click on the already selected
++    // commit closes it, a double-click runs user command 3, the wheel scrolls the list.
++    fn handle_mouse(&mut self, m: MouseEvent) {
++        let area = self.app_status.view_area;
++        match (&mut self.view, m.kind) {
++            (View::List(view), MouseEventKind::Down(MouseButton::Left)) => {
++                if m.row < area.y || m.row >= area.y + area.height {
++                    return;
++                }
++                view.select_row((m.row - area.y) as usize);
++                let hash = view.as_list_state().selected_commit_hash().as_str().to_string();
++                if !self.is_double_click(hash) {
++                    self.ec.send(AppEvent::OpenDetail);
++                }
++            }
++            (View::Detail(view), MouseEventKind::Down(MouseButton::Left)) => {
++                let list = view.list_area(area);
++                if m.row < list.y || m.row >= list.y + list.height {
++                    return;
++                }
++                let same = view.select_row(self.repository, (m.row - list.y) as usize);
++                let hash = view.as_list_state().selected_commit_hash().as_str().to_string();
++                if !self.is_double_click(hash) && same {
++                    self.ec.send(AppEvent::CloseDetail);
++                }
++            }
++            (View::List(view), MouseEventKind::ScrollDown) => {
++                view.handle_event(UserEventWithCount::new(UserEvent::ScrollDown, 3), KeyEvent::from(KeyCode::Null));
++            }
++            (View::List(view), MouseEventKind::ScrollUp) => {
++                view.handle_event(UserEventWithCount::new(UserEvent::ScrollUp, 3), KeyEvent::from(KeyCode::Null));
++            }
++            _ => {}
++        }
++    }
++
++    // Second click on the same commit within 400 ms: runs user command 3 and returns true.
++    fn is_double_click(&mut self, hash: String) -> bool {
++        let now = std::time::Instant::now();
++        let double = matches!(&self.app_status.last_click, Some((at, h))
++            if *h == hash && now.duration_since(*at).as_millis() < 400);
++        self.app_status.last_click = if double { None } else { Some((now, hash)) };
++        if double {
++            self.ec.send(AppEvent::OpenUserCommand(3));
++        }
++        double
++    }
++
+     fn render(&mut self, f: &mut Frame) {
+         let base = Block::default()
+             .fg(self.ctx.color_theme.fg)
+diff --git a/src/event.rs b/src/event.rs
+index 5592d68..0fa9551 100644
+--- a/src/event.rs
++++ b/src/event.rs
+@@ -7,7 +7,7 @@ use std::{
+     thread,
+ };
+ 
+-use ratatui::crossterm::event::KeyEvent;
++use ratatui::crossterm::event::{KeyEvent, MouseEvent};
+ use serde::{
+     de::{self, Deserializer, Visitor},
+     Deserialize,
+@@ -18,6 +18,7 @@ use crate::view::RefreshViewContext;
+ #[derive(Debug)]
+ pub enum AppEvent {
+     Key(KeyEvent),
++    Mouse(MouseEvent),
+     Resize(usize, usize),
+     Quit,
+     OpenDetail,
+@@ -128,6 +129,9 @@ impl EventController {
+                         ratatui::crossterm::event::Event::Key(key) => {
+                             tx.send(AppEvent::Key(key));
+                         }
++                        ratatui::crossterm::event::Event::Mouse(m) => {
++                            tx.send(AppEvent::Mouse(m));
++                        }
+                         ratatui::crossterm::event::Event::Resize(w, h) => {
+                             tx.send(AppEvent::Resize(w as usize, h as usize));
+                         }
+@@ -151,7 +155,8 @@ impl EventController {
+     pub fn resume(&self) {
+         ratatui::crossterm::execute!(
+             std::io::stdout(),
+-            ratatui::crossterm::terminal::EnterAlternateScreen
++            ratatui::crossterm::terminal::EnterAlternateScreen,
++            ratatui::crossterm::event::EnableMouseCapture
+         )
+         .unwrap();
+         ratatui::crossterm::terminal::enable_raw_mode().unwrap();
+@@ -166,6 +171,7 @@ impl EventController {
+         ratatui::crossterm::terminal::disable_raw_mode().unwrap();
+         ratatui::crossterm::execute!(
+             std::io::stdout(),
++            ratatui::crossterm::event::DisableMouseCapture,
+             ratatui::crossterm::terminal::LeaveAlternateScreen
+         )
+         .unwrap();
+diff --git a/src/main.rs b/src/main.rs
+index a8cde0c..cc8d41a 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -220,6 +220,7 @@ fn main() -> Result<()> {
+ 
+         if terminal.is_none() {
+             terminal = Some(ratatui::init());
++            ratatui::crossterm::execute!(std::io::stdout(), ratatui::crossterm::event::EnableMouseCapture)?;
+         }
+ 
+         let mut app = App::new(
+@@ -246,6 +247,7 @@ fn main() -> Result<()> {
+         }
+     };
+ 
++    let _ = ratatui::crossterm::execute!(std::io::stdout(), ratatui::crossterm::event::DisableMouseCapture);
+     ratatui::restore();
+     ret.map_err(Into::into)
+ }
+diff --git a/src/view/detail.rs b/src/view/detail.rs
+index a7f597b..a57d70d 100644
+--- a/src/view/detail.rs
++++ b/src/view/detail.rs
+@@ -178,6 +178,17 @@ impl<'a> DetailView<'a> {
+         Layout::vertical([Constraint::Min(0), Constraint::Length(detail_height)]).areas(area)
+     }
+ 
++    pub fn list_area(&self, area: Rect) -> Rect {
++        self.split_areas(area)[0]
++    }
++
++    /// Selects the row-th visible row of the list; returns whether it was already selected.
++    pub fn select_row(&mut self, repository: &Repository, row: usize) -> bool {
++        let mut same = false;
++        self.update_selected_commit(repository, |state| same = state.select_row(row));
++        same
++    }
++
+     pub fn select_older_commit(&mut self, repository: &Repository) {
+         self.update_selected_commit(repository, |state| state.select_next());
+     }
+diff --git a/src/view/list.rs b/src/view/list.rs
+index d76ff15..abe9e48 100644
+--- a/src/view/list.rs
++++ b/src/view/list.rs
+@@ -214,6 +214,10 @@ impl<'a> ListView<'a> {
+         self.commit_list_state.as_mut().unwrap()
+     }
+ 
++    pub fn select_row(&mut self, row: usize) -> bool {
++        self.as_mut_list_state().select_row(row)
++    }
++
+     pub fn as_list_state(&self) -> &CommitListState<'a> {
+         self.commit_list_state.as_ref().unwrap()
+     }
+diff --git a/src/widget/commit_list.rs b/src/widget/commit_list.rs
+index 0e4a26c..8809d95 100644
+--- a/src/widget/commit_list.rs
++++ b/src/widget/commit_list.rs
+@@ -481,6 +481,16 @@ impl<'a> CommitListState<'a> {
+             .commit_hash
+     }
+ 
++    /// Selects the row-th visible row; returns whether it was already selected.
++    pub fn select_row(&mut self, row: usize) -> bool {
++        if row >= self.height || self.offset + row >= self.total {
++            return false;
++        }
++        let same = self.selected == row;
++        self.selected = row;
++        same
++    }
++
+     fn current_selected_index(&self) -> usize {
+         self.offset + self.selected
+     }

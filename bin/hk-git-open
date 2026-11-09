@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Opens a commit in GitLab/GitHub from the current repo: hk-git-open <hash>
+url=$(git remote get-url origin) || exit 1
+url=${url%.git}
+case "$url" in
+  git@*) host=${url#git@}; url="https://${host%%:*}/${host#*:}" ;;
+  ssh://*) url="https://${url#ssh://*@}" ;;
+esac
+case "$url" in *github.com*) path=commit ;; *) path=-/commit ;; esac
+open "$url/$path/$1"

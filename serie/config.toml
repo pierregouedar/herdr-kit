@@ -1,0 +1,56 @@
+# serie: Git Graph VS Code style graph, Atom One Dark colors (Herdr theme)
+[core.option]
+protocol = "kitty"
+order = "topo"
+graph_style = "curved"
+graph_antialias = true
+initial_selection = "head"
+
+[core.git]
+mailmap = true
+
+[ui.list]
+scrolloff = 3
+columns = ["graph", "marker", "subject", "name", "date"]
+subject_min_width = 30
+date_format = "%d %b %H:%M"
+date_width = 12
+name_width = 14
+
+[ui.detail]
+height = 18
+date_format = "%d/%m/%Y %H:%M"
+
+[graph]
+row_image_width = "fixed"
+
+[graph.color]
+branches = ["#61AFEF", "#C678DD", "#98C379", "#E5C07B", "#E06C76", "#56B6C2", "#D19A66"]
+edge = "#282C34"
+background = "#00000000"
+
+[color]
+list_selected_fg = "#FFFFFF"
+list_selected_bg = "#2C313C"
+list_ref_paren_fg = "#5C6370"
+list_ref_branch_fg = "#98C379"
+list_ref_remote_branch_fg = "#E06C76"
+list_ref_tag_fg = "#E5C07B"
+list_head_fg = "#61AFEF"
+list_subject_fg = "#ABB2BF"
+list_name_fg = "#7F848E"
+list_hash_fg = "#5C6370"
+list_date_fg = "#5C6370"
+divider_fg = "#3E4451"
+detail_email_fg = "#61AFEF"
+help_key_fg = "#E5C07B"
+
+# d: files and diff of the commit in the Herdr modal; o: open the selected commit in GitLab (c / C already copy the hash)
+[core.user_command]
+commands_1 = { name = "git diff", commands = ["git", "--no-pager", "diff", "--color=always", "{{first_parent_hash}}", "{{target_hash}}"] }
+commands_3 = { name = "diff (Herdr)", type = "silent", commands = ["hk-commit-diff", "{{target_hash}}"] }
+commands_2 = { name = "open in GitLab", type = "silent", commands = ["hk-git-open", "{{target_hash}}"] }
+
+[keybind]
+user_command_2 = ["o"]
+user_command_3 = ["d"]

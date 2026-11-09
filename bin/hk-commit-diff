@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# From serie (d key): opens the hk-diff modal on a commit. hk-commit-diff <hash>
+repo=$(git rev-parse --show-toplevel) || exit 1
+subject=$(git log -1 --format=%s "$1" | head -c 120)
+python3 -c 'import json,sys;json.dump(dict(repo=sys.argv[1],commit=sys.argv[2],subject=sys.argv[3]),open(sys.argv[4],"w"))' \
+  "$repo" "$1" "$subject" "$HOME/.cache/hk-commit-diff.json"
+herdr-app do git-follow.commit-diff >/dev/null

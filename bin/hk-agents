@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""Claude Code subagents, grouped by project then session (sliding window)."""
+# ponytail: 2 s polling on disk, no inotify; enough for a display
+import glob, json, os, re, shutil, time
+
+ROOT = os.path.expanduser("~/.claude/projects")
+WINDOW_H = 12          # sessions active within the last 12 hours
+STALE_S = 600          # "running" with no write for 10 min = probably dead
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+C = dict(r="\033[0m", b="\033[1m", d="\033[2m", y="\033[38;2;229;192;123m", g="\033[38;2;152;195;121m",
+         c="\033[38;2;86;182;194m", m="\033[38;2;198;120;221m", gr="\033[38;2;92;99;112m")
+
+def ago(s):
+    s = int(s)
+    return f"{s}s" if s < 60 else f"{s // 60}min" if s < 3600 else f"{s // 3600}h{(s % 3600) // 60:02d}"
+
+def title(session_file):
+    try:
+        with open(session_file, "rb") as f:
+            f.seek(max(0, os.path.getsize(session_file) - 400_000))
+            for line in reversed(f.read().splitlines()):
+                if b'"ai-title"' in line or b'"custom-title"' in line:
+                    j = json.loads(line)
+                    return j.get("customTitle") or j.get("aiTitle")
+    except (OSError, ValueError):
+        pass
+    return None
+
+def project_name(d):
+    n = os.path.basename(d).replace(os.path.expanduser("~").replace("/", "-").replace(".", "-") + "-", "").replace("dev-", "")
+    return n or "~"
+
+OMP = os.path.expanduser("~/.omp/agent/sessions")
+
+def omp_title(main_log):
+    """Title of an omp session: last non-empty "title" line (without the leading icon)."""
+    t = None
+    try:
+        with open(main_log) as f:
+            for line in f:
+                if line.startswith('{"type":"title"'):
+                    v = json.loads(line).get("title", "").strip()
+                    if v:
+                        t = v
+    except (OSError, ValueError):
+        pass
+    if t and not t[0].isalnum():
+        t = t[1:].strip()  # leading Nerd Font icon
+    return t
+
+def omp_cwd(main_log):
+    try:
+        with open(main_log) as f:
+            for line in f:
+                if line.startswith('{"type":"session"'):
+                    return json.loads(line).get("cwd")
+    except (OSError, ValueError):
+        pass
+    return None
+
+def omp_sessions(now):
+    """omp sessions with subagents: (project folder encoded the Claude way, sid, title, [(meta, born, mtime, log)])."""
+    out = []
+    for sdir in glob.glob(f"{OMP}/*/*/"):
+        sdir = sdir.rstrip("/")
+        main_log = sdir + ".jsonl"
+        agents = []
+        for log in glob.glob(f"{sdir}/*.jsonl"):
+            name = os.path.basename(log)[:-6]
+            if name.startswith("__"):
+                continue  # omp internal agents (advisor)
+            st = os.stat(log)
+            if now - st.st_mtime > WINDOW_H * 3600:
+                continue
+            report = log[:-6] + ".md"
+            desc = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
+            meta = {"description": desc, "agentType": "omp", "finished": os.path.exists(report)}
+            agents.append((meta, st.st_birthtime, st.st_mtime, log))
+        if agents:
+            cwd = omp_cwd(main_log) or ""
+            out.append((re.sub(r"[/.]", "-", cwd), os.path.basename(sdir).split("_")[-1], omp_title(main_log), agents))
+    return out
+
+def snapshot(now):
+    groups = {}
+    for proj, sid, ttl, agents in omp_sessions(now):
+        groups.setdefault(f"{ROOT}/{proj}", []).append((sid, ttl, agents))
+    for sub in glob.glob(f"{ROOT}/*/*/subagents"):
+        sess_dir = os.path.dirname(sub)
+        agents = []
+        for meta in glob.glob(f"{sub}/*.meta.json"):
+            log = meta[:-len(".meta.json")] + ".jsonl"
+            try:
+                m, st = json.load(open(meta)), os.stat(log)
+            except (OSError, ValueError):
+                continue
+            if now - st.st_mtime > WINDOW_H * 3600:
+                continue
+            agents.append((m, st.st_birthtime, st.st_mtime, log))
+        if agents:
+            proj = os.path.dirname(sess_dir)
+            sid = os.path.basename(sess_dir)
+            groups.setdefault(proj, []).append((sid, title(f"{sess_dir}.jsonl"), agents))
+    return groups
+
+def render(now, tick):
+    w = shutil.get_terminal_size().columns
+    out = [f"{C['b']}Subagents{C['r']}  {C['gr']}{time.strftime('%H:%M:%S')} · {WINDOW_H} dernières heures{C['r']}"]
+    groups = snapshot(now)
+    if not groups:
+        out.append(f"{C['gr']}  aucun subagent récent{C['r']}")
+    for proj, sessions in sorted(groups.items(), key=lambda g: -max(a[2] for s in g[1] for a in s[2])):
+        running = sum(1 for s in sessions for m, _, t in s[2] if not m.get("finished") and now - t < STALE_S)
+        badge = f" {C['y']}{running} en cours{C['r']}" if running else ""
+        out += ["", f"{C['c']}{C['b']}▍{project_name(proj)}{C['r']}{badge}"]
+        for sid, ttl, agents in sorted(sessions, key=lambda s: -max(a[2] for a in s[2])):
+            out.append(f"  {C['m']}◆{C['r']} {(ttl or sid[:8])[:w - 6]}")
+            agents.sort(key=lambda a: (bool(a[0].get("finished")), -a[1]))
+            for i, (m, born, mod, _log) in enumerate(agents[:8]):
+                last = i == min(len(agents), 8) - 1
+                branch = "└" if last else "├"
+                if m.get("finished"):
+                    icon, dur = f"{C['g']}✓{C['r']}", ago(mod - born)
+                elif now - mod > STALE_S:
+                    icon, dur = f"{C['gr']}◌{C['r']}", "inactif"
+                else:
+                    icon, dur = f"{C['y']}{SPIN[tick % len(SPIN)]}{C['r']}", ago(now - born)
+                kind = m.get("agentType", "")
+                desc = m.get("description", "?")
+                room = max(10, w - len(kind) - len(dur) - 12)
+                out.append(f"    {C['gr']}{branch}{C['r']} {icon} {desc[:room]}  {C['gr']}{kind} · {dur}{C['r']}")
+            if len(agents) > 8:
+                out.append(f"      {C['gr']}+{len(agents) - 8} autres{C['r']}")
+    return "\n".join(out)
+
+def report(log):
+    """Last assistant text in a subagent's transcript (its final report)."""
+    md = log[:-6] + ".md" if log.endswith(".jsonl") else None
+    if md and os.path.exists(md):
+        return open(md).read()
+    last = None
+    with open(log) as f:
+        for line in f:
+            if '"assistant"' not in line:
+                continue
+            try:
+                j = json.loads(line)
+            except ValueError:
+                continue
+            if j.get("type") != "assistant":
+                continue
+            content = j.get("message", {}).get("content", [])
+            # The final report arrives either as text or via the SubagentHandback tool
+            texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+            texts += [c.get("input", {}).get("message", "") for c in content
+                      if c.get("type") == "tool_use" and c.get("name") == "SubagentHandback"]
+            if any(t.strip() for t in texts):
+                last = "\n\n".join(t for t in texts if t.strip())
+    return last or "_Pas encore de rapport._"
+
+def as_json(now):
+    out = []
+    for proj, sessions in snapshot(now).items():
+        ss = []
+        for sid, ttl, agents in sessions:
+            rows = []
+            for m, born, mod, log in agents:
+                state = "done" if m.get("finished") else "stale" if now - mod > STALE_S else "running"
+                rows.append(dict(desc=m.get("description", "?"), kind=m.get("agentType", ""), state=state,
+                                 dur=ago((mod if state == "done" else now) - born), last=mod, born=born, log=log))
+            rows.sort(key=lambda r: (r["state"] != "running", -r["born"]))
+            ss.append(dict(id=sid, title=ttl or sid[:8], last=max(r["last"] for r in rows), agents=rows))
+        ss.sort(key=lambda x: -x["last"])
+        out.append(dict(project=project_name(proj), dir=os.path.basename(proj), last=ss[0]["last"], sessions=ss))
+    out.sort(key=lambda x: -x["last"])
+    return out
+
+def omp_costs():
+    day = time.strftime("%Y-%m-%d")
+    utc_day = time.strftime("%Y-%m-%d", time.gmtime())
+    out = {}
+    for main_log in glob.glob(f"{OMP}/*/*.jsonl"):
+        if time.time() - os.path.getmtime(main_log) > 86400:
+            continue
+        total = 0.0
+        for log in [main_log, *glob.glob(main_log[:-6] + "/*.jsonl")]:
+            try:
+                with open(log) as f:
+                    for line in f:
+                        if '"cost"' not in line or (day not in line and utc_day not in line):
+                            continue
+                        try:
+                            m = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not str(m.get("timestamp", "")).startswith((day, utc_day)):
+                            continue
+                        total += ((m.get("message") or {}).get("usage") or {}).get("cost", {}).get("total", 0) or 0
+            except OSError:
+                pass
+        if total:
+            out[omp_title(main_log) or os.path.basename(main_log)] = round(total, 2)
+    return out
+
+def codex_threads(dirs):
+    """Recent Codex sessions (12 h) launched in one of the folders: title, state, subagent or not."""
+    import sqlite3
+    db = os.path.expanduser("~/.codex/state_5.sqlite")
+    if not os.path.exists(db):
+        return []
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    rows = con.execute("select id, title, cwd, source, rollout_path, updated_at_ms, model from threads "
+                       "where archived = 0 and updated_at_ms > ? order by updated_at_ms desc limit 40",
+                       (int((time.time() - WINDOW_H * 3600) * 1000),)).fetchall()
+    out = []
+    for tid, title, cwd, source, rollout, upd, model in rows:
+        if dirs and not any(cwd == d or (cwd or "").startswith(d + "/") for d in dirs):
+            continue
+        try:
+            mtime = os.path.getmtime(rollout)
+        except OSError:
+            mtime = upd / 1000
+        line = next((l.strip("# ").strip() for l in (title or "").splitlines() if l.strip()), "Codex")
+        out.append(dict(id=tid, title=line[:90], cwd=cwd, model=model, sub="subagent" in (source or ""),
+                        state="running" if time.time() - mtime < 120 else "idle", ago=ago(time.time() - mtime)))
+    return out
+
+def history(days=7):
+    """Cost per day over `days` days: Claude (status line) and omp (message usage)."""
+    out = []
+    for k in range(days - 1, -1, -1):
+        day = time.strftime("%Y-%m-%d", time.localtime(time.time() - k * 86400))
+        claude = 0.0
+        for f in glob.glob(os.path.expanduser(f"~/.claude/cost/{day}/*")):
+            try:
+                claude += float(open(f).read() or 0)
+            except (OSError, ValueError):
+                pass
+        out.append(dict(day=day, claude=round(claude, 2), omp=0.0))
+    idx = {d["day"]: d for d in out}
+    since = time.time() - days * 86400
+    for log in glob.glob(f"{OMP}/*/*.jsonl") + glob.glob(f"{OMP}/*/*/*.jsonl"):
+        if os.path.getmtime(log) < since:
+            continue
+        try:
+            with open(log) as f:
+                for line in f:
+                    if '"cost"' not in line:
+                        continue
+                    try:
+                        m = json.loads(line)
+                    except ValueError:
+                        continue
+                    day = str(m.get("timestamp", ""))[:10]
+                    if day in idx:
+                        idx[day]["omp"] += ((m.get("message") or {}).get("usage") or {}).get("cost", {}).get("total", 0) or 0
+        except OSError:
+            pass
+    for d in out:
+        d["omp"] = round(d["omp"], 2)
+    return out
+
+if __name__ == "__main__":
+    import sys
+    if "--session-costs" in sys.argv:
+        # {session title: today's cost} for the pane headers (the Claude terminal title = ai-title)
+        out = {}
+        for f in glob.glob(os.path.expanduser(f"~/.claude/cost/{time.strftime('%Y-%m-%d')}/*")):
+            sid = os.path.basename(f)
+            for log in glob.glob(f"{ROOT}/*/{sid}.jsonl"):
+                t = title(log)
+                if t:
+                    try:
+                        out[t] = round(float(open(f).read() or 0), 2)
+                    except ValueError:
+                        pass
+        for k, v in omp_costs().items():
+            out[k] = round(out.get(k, 0) + v, 2)
+        print(json.dumps(out))
+        sys.exit()
+    if "--cost" in sys.argv:
+        # Sum of today's session costs (written by ~/.claude/statusline.sh)
+        total = 0.0
+        for f in glob.glob(os.path.expanduser(f"~/.claude/cost/{time.strftime('%Y-%m-%d')}/*")):
+            try:
+                total += float(open(f).read() or 0)
+            except (OSError, ValueError):
+                pass
+        total += sum(omp_costs().values())
+        try:
+            limits = json.load(open(os.path.expanduser("~/.claude/cost/limits.json")))
+        except (OSError, ValueError):
+            limits = {}
+                # Codex: limits (5 h / 7 d) of the most recent session that has them;
+        # a just-opened session has none yet, so go back to earlier ones
+        codex = None
+        now = time.time()
+        def pct(w):  # window already reset: 0 %
+            return 0 if not w or (w.get("resets_at") or 0) < now else round(w.get("used_percent", 0))
+        logs = sorted(glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")), key=os.path.getmtime, reverse=True)
+        for log in logs[:15]:
+            with open(log, "rb") as f:
+                f.seek(max(0, os.path.getsize(log) - 300_000))
+                tail = f.read().decode("utf-8", "ignore")
+            i = len(tail)
+            while (i := tail.rfind('"rate_limits":', 0, i)) >= 0:
+                try:
+                    rl, _ = json.JSONDecoder().raw_decode(tail[i + len('"rate_limits":'):])
+                except ValueError:
+                    continue
+                if isinstance(rl, dict) and (rl.get("primary") or rl.get("secondary")):
+                    codex = dict(rl5=pct(rl.get("primary")), rl5_reset=(rl.get("primary") or {}).get("resets_at", 0),
+                                 rl7=pct(rl.get("secondary")))
+                    break
+            if codex:
+                break
+        # omp queries the limits itself (Claude and Codex): its reading wins if it is more recent
+        try:
+            import sqlite3
+            con = sqlite3.connect(f"file:{os.path.expanduser('~/.omp/agent/agent.db')}?mode=ro", uri=True)
+            rows = con.execute("select limit_id, used_fraction, resets_at, max(recorded_at) from usage_history"
+                               " where limit_id in ('anthropic:5h','anthropic:7d','openai-codex:primary','openai-codex:secondary')"
+                               " group by limit_id").fetchall()
+            con.close()
+            u = {r[0]: (0 if (r[2] or 0) / 1000 < now else round((r[1] or 0) * 100), (r[2] or 0) // 1000, r[3] / 1000) for r in rows}
+            def mtime(path):
+                try: return os.path.getmtime(os.path.expanduser(path))
+                except OSError: return 0
+            if "anthropic:5h" in u and u["anthropic:5h"][2] > mtime("~/.claude/cost/limits.json"):
+                limits = dict(rl5=u["anthropic:5h"][0], rl5_reset=u["anthropic:5h"][1], rl7=u.get("anthropic:7d", (0,))[0])
+            if "openai-codex:primary" in u and (not logs or u["openai-codex:primary"][2] > os.path.getmtime(logs[0])):
+                codex = dict(rl5=u["openai-codex:primary"][0], rl5_reset=u["openai-codex:primary"][1],
+                             rl7=u.get("openai-codex:secondary", (0,))[0])
+        except Exception:
+            pass
+        print(json.dumps(dict(today=round(total, 2), **limits, codex=codex)))
+        sys.exit()
+    if "--codex" in sys.argv:
+        print(json.dumps(codex_threads(sys.argv[sys.argv.index("--codex") + 1:])))
+        sys.exit()
+    if "--history" in sys.argv:
+        print(json.dumps(history()))
+        sys.exit()
+    if "--report" in sys.argv:
+        print(report(sys.argv[sys.argv.index("--report") + 1]))
+        sys.exit()
+    if "--json" in sys.argv:
+        print(json.dumps(as_json(time.time())))
+        sys.exit()
+    tick = 0
+    print("\033[?25l", end="")
+    try:
+        while True:
+            print("\033[H\033[2J" + render(time.time(), tick), end="", flush=True)
+            tick += 1
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print("\033[?25h")

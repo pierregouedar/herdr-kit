@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Latest test results of a repo, read from disk (no test is run).
+Usage: hk-tests <repo>  ->  JSON [{kind, label, at, ok, failed: [names], rerun, rerun_failed, folder}]
+- Playwright : test-results/.last-run.json
+- Vitest     : node_modules/.vite/vitest/*/results.json (failure per file)
+- PHPUnit    : .phpunit.cache/test-results ou .phpunit.result.cache (defects 7 = failure, 8 = error)
+"""
+import glob, json, os, sys
+
+repo = sys.argv[1]
+out = []
+
+def pm(folder):
+    """Package manager of the repo, based on its lockfile (folder or root)."""
+    for d in (folder, repo):
+        for lock, cmd in (("pnpm-lock.yaml", ["pnpm"]), ("yarn.lock", ["yarn"]), ("bun.lockb", ["bun", "run"]),
+                          ("bun.lock", ["bun", "run"]), ("package-lock.json", ["npm", "run"])):
+            if os.path.exists(os.path.join(d, lock)):
+                return cmd
+    return ["npm", "run"]
+
+def first(patterns):
+    hits = [p for pat in patterns for p in glob.glob(os.path.join(repo, pat))]
+    return max(hits, key=os.path.getmtime) if hits else None
+
+def load(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+# Playwright
+p = first(["test-results/.last-run.json", "*/test-results/.last-run.json"])
+if p and (j := load(p)):
+    # Rerun from the folder whose package.json has a test:e2e script (front/... subproject), otherwise the root
+    sub = os.path.dirname(os.path.dirname(p))
+    folder = sub if "test:e2e" in ((load(os.path.join(sub, "package.json")) or {}).get("scripts", {})) else repo
+    out.append(dict(kind="e2e", label="e2e", at=os.path.getmtime(p), ok=j.get("status") == "passed",
+                    failed=j.get("failedTests", []), folder=folder,
+                    rerun=[*pm(folder), "test:e2e"], rerun_failed=[*pm(folder), "test:e2e", "--", "--last-failed"]))
+
+# Vitest (the most recent results cache)
+p = first(["node_modules/.vite/vitest/*/results.json", "*/*/node_modules/.vite/vitest/*/results.json"])
+if p and (j := load(p)):
+    failed = [f.lstrip(":") for f, r in j.get("results", []) if r.get("failed")]
+    out.append(dict(kind="vitest", label="tests", at=os.path.getmtime(p), ok=not failed, failed=failed, folder=repo,
+                    rerun=[*pm(repo), "test"], rerun_failed=[*pm(repo), "test", "--", *failed[:20]] if failed else None))
+
+# PHPUnit (root or a subfolder: api/, back/...)
+p = first([".phpunit.cache/test-results", ".phpunit.result.cache", "*/.phpunit.cache/test-results", "*/.phpunit.result.cache"])
+if p and (j := load(p)):
+    failed = [t for t, code in j.get("defects", {}).items() if code in (7, 8)]
+    folder = os.path.dirname(os.path.dirname(p)) if p.endswith("test-results") else os.path.dirname(p)
+    composer = load(os.path.join(folder, "composer.json")) or {}
+    base = ["composer", "test"] if "test" in composer.get("scripts", {}) else ["vendor/bin/phpunit"]
+    out.append(dict(kind="phpunit", label="phpunit", at=os.path.getmtime(p), ok=not failed, failed=failed, folder=folder,
+                    rerun=base, rerun_failed=base + (["--"] if base[0] == "composer" else []) + ["--order-by=defects", "--stop-on-defect"] if failed else None))
+
+print(json.dumps(out))

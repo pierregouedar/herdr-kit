@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Portless routes whose name contains a keyword (e.g. shop, myapp), with port state.
+# Usage: hk-servers shop myapp   ->  JSON [{url, port, up}]
+# ponytail: nc -z per port, sequential; enough for a dozen routes
+# Launched outside a shell (Herdr mods): PATH without fnm, so use fnm's default Node
+export PATH="$PATH:$HOME/.local/share/fnm/aliases/default/bin"
+[ $# -eq 0 ] && { echo '[]'; exit; }
+pat=$(printf '%s|' "$@"); pat="${pat%|}"
+portless list 2>/dev/null | grep -Eo 'https?://[^ ]+ +-> +localhost:[0-9]+' | while read -r url _ target; do
+  host=${url#*://}; host=${host%%/*}
+  echo "$host" | grep -Eqi "(^|\.)($pat)(\.|$)" || continue
+  port=${target##*:}
+  nc -z -G 1 127.0.0.1 "$port" 2>/dev/null && up=true || up=false
+  printf '{"url":"%s","port":%s,"up":%s}\n' "$url" "$port" "$up"
+done | jq -s .

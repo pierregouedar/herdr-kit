@@ -1,0 +1,13 @@
+{
+  "layout:dev": {
+    "cmd-alt-f": "hk-git-bar.fetch",
+    "cmd-alt-p": "hk-git-bar.pull",
+    "cmd-alt-u": "hk-git-bar.push",
+    "cmd-alt-k": "hk-git-bar.clean",
+    "cmd-.": "git-follow.focus",
+    "cmd-k": "mod.open:hk-palette",
+    "cmd-alt-right": "git-follow.nav-next",
+    "cmd-alt-left": "git-follow.nav-prev",
+    "cmd-alt-r": "mod.open:hk-recap"
+  }
+}
